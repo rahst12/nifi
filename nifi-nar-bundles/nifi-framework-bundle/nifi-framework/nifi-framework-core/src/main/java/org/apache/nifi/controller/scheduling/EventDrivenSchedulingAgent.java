@@ -16,13 +16,6 @@
  */
 package org.apache.nifi.controller.scheduling;
 
-import java.io.IOException;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.state.StateManager;
 import org.apache.nifi.components.state.StateManagerProvider;
@@ -43,6 +36,7 @@ import org.apache.nifi.controller.service.ControllerServiceProvider;
 import org.apache.nifi.encrypt.StringEncryptor;
 import org.apache.nifi.engine.FlowEngine;
 import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.nar.ExtensionManager;
 import org.apache.nifi.nar.NarCloseable;
 import org.apache.nifi.processor.ProcessSessionFactory;
 import org.apache.nifi.processor.SimpleProcessLogger;
@@ -53,6 +47,13 @@ import org.apache.nifi.util.FormatUtils;
 import org.apache.nifi.util.ReflectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
 
@@ -65,6 +66,7 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
     private final AtomicInteger maxThreadCount;
     private final AtomicInteger activeThreadCount = new AtomicInteger(0);
     private final StringEncryptor encryptor;
+    private final ExtensionManager extensionManager;
 
     private volatile String adminYieldDuration = "1 sec";
 
@@ -72,7 +74,8 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
     private final ConcurrentMap<Connectable, LifecycleState> scheduleStates = new ConcurrentHashMap<>();
 
     public EventDrivenSchedulingAgent(final FlowEngine flowEngine, final ControllerServiceProvider serviceProvider, final StateManagerProvider stateManagerProvider,
-        final EventDrivenWorkerQueue workerQueue, final RepositoryContextFactory contextFactory, final int maxThreadCount, final StringEncryptor encryptor) {
+                                      final EventDrivenWorkerQueue workerQueue, final RepositoryContextFactory contextFactory, final int maxThreadCount,
+                                      final StringEncryptor encryptor, final ExtensionManager extensionManager) {
         super(flowEngine);
         this.serviceProvider = serviceProvider;
         this.stateManagerProvider = stateManagerProvider;
@@ -80,6 +83,7 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
         this.contextFactory = contextFactory;
         this.maxThreadCount = new AtomicInteger(maxThreadCount);
         this.encryptor = encryptor;
+        this.extensionManager = extensionManager;
 
         for (int i = 0; i < maxThreadCount; i++) {
             final Runnable eventDrivenTask = new EventDrivenTask(workerQueue, activeThreadCount);
@@ -255,10 +259,10 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
                             }
                             try {
                                 final long processingNanos = System.nanoTime() - startNanos;
-                                final StandardFlowFileEvent procEvent = new StandardFlowFileEvent(connectable.getIdentifier());
+                                final StandardFlowFileEvent procEvent = new StandardFlowFileEvent();
                                 procEvent.setProcessingNanos(processingNanos);
                                 procEvent.setInvocations(invocationCount);
-                                context.getFlowFileEventRepository().updateRepository(procEvent);
+                                context.getFlowFileEventRepository().updateRepository(procEvent, connectable.getIdentifier());
                             } catch (final IOException e) {
                                 logger.error("Unable to update FlowFileEvent Repository for {}; statistics may be inaccurate. Reason for failure: {}", connectable, e.toString());
                                 logger.error("", e);
@@ -305,7 +309,7 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
             }
 
             try {
-                try (final AutoCloseable ncl = NarCloseable.withComponentNarLoader(worker.getClass(), worker.getIdentifier())) {
+                try (final AutoCloseable ncl = NarCloseable.withComponentNarLoader(extensionManager, worker.getClass(), worker.getIdentifier())) {
                     worker.onTrigger(processContext, sessionFactory);
                 } catch (final ProcessException pe) {
                     logger.error("{} failed to process session due to {}", worker, pe.toString());
@@ -323,7 +327,7 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
                 }
             } finally {
                 if (!scheduleState.isScheduled() && scheduleState.getActiveThreadCount() == 1 && scheduleState.mustCallOnStoppedMethods()) {
-                    try (final NarCloseable x = NarCloseable.withComponentNarLoader(worker.getClass(), worker.getIdentifier())) {
+                    try (final NarCloseable x = NarCloseable.withComponentNarLoader(extensionManager, worker.getClass(), worker.getIdentifier())) {
                         ReflectionUtils.quietlyInvokeMethodsWithAnnotation(OnStopped.class, worker, processContext);
                     }
                 }
@@ -346,7 +350,7 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
             }
 
             try {
-                try (final AutoCloseable ncl = NarCloseable.withComponentNarLoader(worker.getProcessor().getClass(), worker.getIdentifier())) {
+                try (final AutoCloseable ncl = NarCloseable.withComponentNarLoader(extensionManager, worker.getProcessor().getClass(), worker.getIdentifier())) {
                     worker.onTrigger(processContext, sessionFactory);
                 } catch (final ProcessException pe) {
                     final ComponentLog procLog = new SimpleProcessLogger(worker.getIdentifier(), worker.getProcessor());
@@ -365,7 +369,7 @@ public class EventDrivenSchedulingAgent extends AbstractSchedulingAgent {
                 // if the processor is no longer scheduled to run and this is the last thread,
                 // invoke the OnStopped methods
                 if (!scheduleState.isScheduled() && scheduleState.getActiveThreadCount() == 1 && scheduleState.mustCallOnStoppedMethods()) {
-                    try (final NarCloseable x = NarCloseable.withComponentNarLoader(worker.getProcessor().getClass(), worker.getIdentifier())) {
+                    try (final NarCloseable x = NarCloseable.withComponentNarLoader(extensionManager, worker.getProcessor().getClass(), worker.getIdentifier())) {
                         ReflectionUtils.quietlyInvokeMethodsWithAnnotation(OnStopped.class, worker.getProcessor(), processContext);
                     }
                 }

@@ -17,26 +17,29 @@
 
 package org.apache.nifi.serialization;
 
+import org.apache.nifi.serialization.record.DataType;
+import org.apache.nifi.serialization.record.RecordField;
+import org.apache.nifi.serialization.record.RecordSchema;
+import org.apache.nifi.serialization.record.SchemaIdentifier;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
-
-import org.apache.nifi.serialization.record.DataType;
-import org.apache.nifi.serialization.record.RecordField;
-import org.apache.nifi.serialization.record.RecordSchema;
-import org.apache.nifi.serialization.record.SchemaIdentifier;
 
 public class SimpleRecordSchema implements RecordSchema {
     private List<RecordField> fields = null;
     private Map<String, RecordField> fieldMap = null;
     private final boolean textAvailable;
-    private final String text;
+    private final AtomicReference<String> text = new AtomicReference<>();
     private final String schemaFormat;
     private final SchemaIdentifier schemaIdentifier;
+    private String schemaName;
+    private String schemaNamespace;
 
     public SimpleRecordSchema(final List<RecordField> fields) {
         this(fields, createText(fields), null, false, SchemaIdentifier.EMPTY);
@@ -50,6 +53,10 @@ public class SimpleRecordSchema implements RecordSchema {
         this(text, schemaFormat, true, id);
     }
 
+    public SimpleRecordSchema(final SchemaIdentifier id) {
+        this(null, null, false, id);
+    }
+
     public SimpleRecordSchema(final List<RecordField> fields, final String text, final String schemaFormat, final SchemaIdentifier id) {
         this(fields, text, schemaFormat, true, id);
     }
@@ -60,7 +67,7 @@ public class SimpleRecordSchema implements RecordSchema {
     }
 
     private SimpleRecordSchema(final String text, final String schemaFormat, final boolean textAvailable, final SchemaIdentifier id) {
-        this.text = text;
+        this.text.set(text);
         this.schemaFormat = schemaFormat;
         this.schemaIdentifier = id;
         this.textAvailable = textAvailable;
@@ -69,7 +76,7 @@ public class SimpleRecordSchema implements RecordSchema {
     @Override
     public Optional<String> getSchemaText() {
         if (textAvailable) {
-            return Optional.ofNullable(text);
+            return Optional.ofNullable(text.get());
         } else {
             return Optional.empty();
         }
@@ -121,13 +128,13 @@ public class SimpleRecordSchema implements RecordSchema {
 
     @Override
     public List<DataType> getDataTypes() {
-        return getFields().stream().map(recordField -> recordField.getDataType())
+        return getFields().stream().map(RecordField::getDataType)
             .collect(Collectors.toList());
     }
 
     @Override
     public List<String> getFieldNames() {
-        return getFields().stream().map(recordField -> recordField.getFieldName())
+        return getFields().stream().map(RecordField::getFieldName)
             .collect(Collectors.toList());
     }
 
@@ -189,11 +196,49 @@ public class SimpleRecordSchema implements RecordSchema {
 
     @Override
     public String toString() {
-        return text;
+        String textValue = text.get();
+        if (textValue != null) {
+            return textValue;
+        }
+
+        textValue = createText(fields);
+        final boolean updated = text.compareAndSet(null, textValue);
+
+        if (updated) {
+            return textValue;
+        } else {
+            return text.get();
+        }
     }
 
     @Override
     public SchemaIdentifier getIdentifier() {
         return schemaIdentifier;
+    }
+
+    /**
+     * Set schema name.
+     * @param schemaName schema name as defined in a root record.
+     */
+    public void setSchemaName(String schemaName) {
+        this.schemaName = schemaName;
+    }
+
+    @Override
+    public Optional<String> getSchemaName() {
+        return Optional.ofNullable(schemaName);
+    }
+
+    /**
+     * Set schema namespace.
+     * @param schemaNamespace schema namespace as defined in a root record.
+     */
+    public void setSchemaNamespace(String schemaNamespace) {
+        this.schemaNamespace = schemaNamespace;
+    }
+
+    @Override
+    public Optional<String> getSchemaNamespace() {
+        return Optional.ofNullable(schemaNamespace);
     }
 }

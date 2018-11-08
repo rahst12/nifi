@@ -17,32 +17,41 @@
 package org.apache.nifi.processors.standard;
 
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.avro.file.DataFileConstants;
 import org.apache.avro.file.DataFileStream;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.DatumReader;
+import org.apache.commons.compress.compressors.CompressorException;
 import org.apache.nifi.controller.AbstractControllerService;
 import org.apache.nifi.dbcp.DBCPService;
 import org.apache.nifi.flowfile.attributes.FragmentAttributes;
 import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.processors.standard.util.AvroUtil;
 import org.apache.nifi.processors.standard.util.TestJdbcHugeStream;
 import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
-import org.fusesource.hawtbuf.ByteArrayInputStream;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -194,6 +203,40 @@ public class TestExecuteSQL {
     }
 
     @Test
+    public void testCompression() throws SQLException, CompressorException, IOException {
+        // remove previous test database, if any
+        final File dbLocation = new File(DB_LOCATION);
+        dbLocation.delete();
+
+        // load test data to database
+        final Connection con = ((DBCPService) runner.getControllerService("dbcp")).getConnection();
+        Statement stmt = con.createStatement();
+
+        try {
+            stmt.execute("drop table TEST_NULL_INT");
+        } catch (final SQLException sqle) {
+        }
+
+        stmt.execute("create table TEST_NULL_INT (id integer not null, val1 integer, val2 integer, constraint my_pk primary key (id))");
+
+        stmt.execute("insert into TEST_NULL_INT (id, val1, val2) VALUES (0, NULL, 1)");
+        stmt.execute("insert into TEST_NULL_INT (id, val1, val2) VALUES (1, 1, 1)");
+
+        runner.setIncomingConnection(false);
+        runner.setProperty(ExecuteSQL.COMPRESSION_FORMAT, AvroUtil.CodecType.BZIP2.name());
+        runner.setProperty(ExecuteSQL.SQL_SELECT_QUERY, "SELECT * FROM TEST_NULL_INT");
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(ExecuteSQL.REL_SUCCESS, 1);
+
+        MockFlowFile flowFile = runner.getFlowFilesForRelationship(ExecuteSQL.REL_SUCCESS).get(0);
+
+        try (DataFileStream<GenericRecord> dfs = new DataFileStream<>(new ByteArrayInputStream(flowFile.toByteArray()), new GenericDatumReader<GenericRecord>())) {
+            assertEquals(AvroUtil.CodecType.BZIP2.name().toLowerCase(), dfs.getMetaString(DataFileConstants.CODEC).toLowerCase());
+        }
+    }
+
+    @Test
     public void testWithOutputBatching() throws SQLException {
         // remove previous test database, if any
         final File dbLocation = new File(DB_LOCATION);
@@ -309,6 +352,48 @@ public class TestExecuteSQL {
     }
 
     @Test
+    public void testNoRowsStatementCreatesEmptyFlowFile() throws Exception {
+        // remove previous test database, if any
+        final File dbLocation = new File(DB_LOCATION);
+        dbLocation.delete();
+
+        // load test data to database
+        final Connection con = ((DBCPService) runner.getControllerService("dbcp")).getConnection();
+        Statement stmt = con.createStatement();
+
+        try {
+            stmt.execute("drop table TEST_NULL_INT");
+        } catch (final SQLException sqle) {
+        }
+
+        stmt.execute("create table TEST_NULL_INT (id integer not null, val1 integer, val2 integer, constraint my_pk primary key (id))");
+
+        runner.setIncomingConnection(true);
+        runner.setProperty(ExecuteSQL.SQL_SELECT_QUERY, "select * from TEST_NULL_INT");
+        runner.enqueue("Hello".getBytes());
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(ExecuteSQL.REL_SUCCESS, 1);
+        MockFlowFile firstFlowFile = runner.getFlowFilesForRelationship(ExecuteSQL.REL_SUCCESS).get(0);
+        firstFlowFile.assertAttributeEquals(ExecuteSQL.RESULT_ROW_COUNT, "0");
+        final InputStream in = new ByteArrayInputStream(firstFlowFile.toByteArray());
+        final DatumReader<GenericRecord> datumReader = new GenericDatumReader<>();
+        try (DataFileStream<GenericRecord> dataFileReader = new DataFileStream<>(in, datumReader)) {
+            GenericRecord record = null;
+            long recordsFromStream = 0;
+            while (dataFileReader.hasNext()) {
+                // Reuse record object by passing it to next(). This saves us from
+                // allocating and garbage collecting many objects for files with
+                // many items.
+                record = dataFileReader.next(record);
+                recordsFromStream += 1;
+            }
+
+            assertEquals(0, recordsFromStream);
+        }
+    }
+
+    @Test
     public void testWithDuplicateColumns() throws SQLException {
         // remove previous test database, if any
         final File dbLocation = new File(DB_LOCATION);
@@ -363,6 +448,33 @@ public class TestExecuteSQL {
         // There should be no flow files on either relationship
         runner.assertAllFlowFilesTransferred(ExecuteSQL.REL_FAILURE, 0);
         runner.assertAllFlowFilesTransferred(ExecuteSQL.REL_SUCCESS, 0);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testWithSqlExceptionErrorProcessingResultSet() throws Exception {
+        DBCPService dbcp = mock(DBCPService.class);
+        Connection conn = mock(Connection.class);
+        when(dbcp.getConnection(any(Map.class))).thenReturn(conn);
+        when(dbcp.getIdentifier()).thenReturn("mockdbcp");
+        PreparedStatement statement = mock(PreparedStatement.class);
+        when(conn.prepareStatement(anyString())).thenReturn(statement);
+        when(statement.execute()).thenReturn(true);
+        ResultSet rs = mock(ResultSet.class);
+        when(statement.getResultSet()).thenReturn(rs);
+        // Throw an exception the first time you access the ResultSet, this is after the flow file to hold the results has been created.
+        when(rs.getMetaData()).thenThrow(SQLException.class);
+
+        runner.addControllerService("mockdbcp", dbcp, new HashMap<>());
+        runner.enableControllerService(dbcp);
+        runner.setProperty(ExecuteSQL.DBCP_SERVICE, "mockdbcp");
+
+        runner.setIncomingConnection(true);
+        runner.enqueue("SELECT 1");
+        runner.run();
+
+        runner.assertTransferCount(ExecuteSQL.REL_FAILURE, 1);
+        runner.assertTransferCount(ExecuteSQL.REL_SUCCESS, 0);
     }
 
     public void invokeOnTrigger(final Integer queryTimeout, final String query, final boolean incomingFlowFile, final Map<String,String> attrs, final boolean setQueryProperty)
