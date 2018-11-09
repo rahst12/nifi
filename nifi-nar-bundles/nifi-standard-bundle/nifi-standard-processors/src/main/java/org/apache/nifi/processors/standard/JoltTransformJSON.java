@@ -38,10 +38,7 @@ import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
-import org.apache.nifi.components.AllowableValue;
-import org.apache.nifi.components.PropertyDescriptor;
-import org.apache.nifi.components.ValidationContext;
-import org.apache.nifi.components.ValidationResult;
+import org.apache.nifi.components.*;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
@@ -202,7 +199,88 @@ public class JoltTransformJSON extends AbstractProcessor {
         return properties;
     }
 
+    private boolean  isJoltSpecBodyValid(ValidationContext validationContext) {
+        if ( !validationContext.getProperty(JOLT_SPEC_BODY).isSet() ) {
+            return false;
+        }
+        if ( StringUtils.isEmpty(validationContext.getProperty(JOLT_SPEC_BODY).getValue() ) {
+            return false;
+        }
+        return true;
+    }
 
+    /**
+     * Validate that a Jolt Spec Body is Valid.
+     * @param joltSpecBody PropertyValue for a joltSpecBody
+     * @return True/False if a Jolt Spec Body is Valid.
+     */
+    private boolean  isJoltSpecBodyValid(PropertyValue joltSpecBody ) {
+        if ( !joltSpecBody.isSet() ) {
+            return false;
+        }
+        if ( StringUtils.isEmpty(joltSpecBody.getValue() ) {
+            return false;
+        }
+        return true;
+    }
+
+    private  enum JOLT_SPEC_BODY_TYPE {
+        JOLT_SPEC_BODY,
+        JOLT_SPEC_FILE,
+        JOLT_SORTR,
+        INVALID
+    }
+
+    private String validateSpecBody(ValidationContext validationContext){
+        final ClassLoader customClassLoader;
+        List<ValidationResult> results;
+
+        try {
+            if (modulePath != null) {
+                customClassLoader = ClassLoaderUtils.getCustomClassLoader(modulePath, this.getClass().getClassLoader(), getJarFilenameFilter());
+            } else {
+                customClassLoader =  this.getClass().getClassLoader();
+            }
+
+            final String specValue =  validationContext.getProperty(JOLT_SPEC_BODY).getValue();
+
+            if (validationContext.isExpressionLanguagePresent(specValue)) {
+                final String invalidExpressionMsg = validationContext.newExpressionLanguageCompiler().validateExpression(specValue,true);
+                if (!StringUtils.isEmpty(invalidExpressionMsg)) {
+                    results.add(new ValidationResult.Builder().valid(false)
+                            .subject(JOLT_SPEC_BODY.getDisplayName())
+                            .explanation("Invalid Expression Language: " + invalidExpressionMsg)
+                            .build());
+                }
+            } else {
+                //for validation we want to be able to ensure the spec is syntactically correct and not try to resolve variables since they may not exist yet
+                Object specJson = SORTR.getValue().equals(transform) ? null : JsonUtils.jsonToObject(specValue.replaceAll("\\$\\{","\\\\\\\\\\$\\{"), DEFAULT_CHARSET);
+
+                if (CUSTOMR.getValue().equals(transform)) {
+                    if (StringUtils.isEmpty(customTransform)) {
+                        final String customMessage = "A custom transformation class should be provided. ";
+                        results.add(new ValidationResult.Builder().valid(false)
+                                .explanation(customMessage)
+                                .build());
+                    } else {
+                        TransformFactory.getCustomTransform(customClassLoader, customTransform, specJson);
+                    }
+                } else {
+                    TransformFactory.getTransform(customClassLoader, transform, specJson);
+                }
+            }
+        } catch (final Exception e) {
+            getLogger().info("Processor is not valid - " + e.toString());
+            String message = "Specification not valid for the selected transformation." ;
+            results.add(new ValidationResult.Builder().valid(false)
+                    .explanation(message)
+                    .build());
+        }
+    }
+
+    /*private enum  chooseJoltSpecType() {
+        return JOLT_SPEC_BODY_TYPE.JOLT_SORTR;
+    }*/
 
     @Override
     protected Collection<ValidationResult> customValidate(ValidationContext validationContext) {
@@ -211,14 +289,47 @@ public class JoltTransformJSON extends AbstractProcessor {
         final String customTransform = validationContext.getProperty(CUSTOM_CLASS).getValue();
         final String modulePath = validationContext.getProperty(MODULES).isSet()? validationContext.getProperty(MODULES).getValue() : null;
 
+        boolean isJoltSpecBodyValid = isJoltSpecBodyValid(validationContext.getProperty(JOLT_SPEC_BODY));
+        boolean isSortTransform = SORTR.getValue().equals(validationContext.getProperty(JOLT_TRANSFORM).getValue());
+
+
+         JOLT_SPEC_BODY_TYPE JOLT_SPEC_TYPE;
+
+        if (isSortTransform) {
+            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.JOLT_SORTR;
+        } else if (isJoltSpecBodyValid) {
+            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.JOLT_SPEC_BODY;
+        } else if (isSortTransform && isJoltSpecBodyValid) {
+            //TODO: Put Message here
+            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.INVALID;
+        } else {
+            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.INVALID;
+        }
+
+        switch (JOLT_SPEC_TYPE) {
+            case JOLT_SORTR:
+                break;
+            case JOLT_SPEC_BODY:
+                //TODO Call validation code in else statement below
+                break;
+            case INVALID:
+                break;
+            default:
+                final String message = "A specification is required for this transformation";
+                results.add(new ValidationResult.Builder().valid(false)
+                        .explanation(message)
+                        .build());
+        }
         //TODO Add a Spec Body or a Spec File
-        if(!validationContext.getProperty(JOLT_SPEC_BODY).isSet() || StringUtils.isEmpty(validationContext.getProperty(JOLT_SPEC_BODY).getValue())){
-            if(!SORTR.getValue().equals(transform)) {
+        if( !isJoltSpecBodyValid ){
+
+            if(!isSortTransform) {
                 final String message = "A specification is required for this transformation";
                 results.add(new ValidationResult.Builder().valid(false)
                         .explanation(message)
                         .build());
             }
+
         } else {
             final ClassLoader customClassLoader;
 
