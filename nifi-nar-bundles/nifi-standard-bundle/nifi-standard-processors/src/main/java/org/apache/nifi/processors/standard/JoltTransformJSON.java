@@ -20,6 +20,7 @@ import java.io.FilenameFilter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.MalformedURLException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -199,184 +200,125 @@ public class JoltTransformJSON extends AbstractProcessor {
         return properties;
     }
 
-    private boolean  isJoltSpecBodyValid(ValidationContext validationContext) {
-        if ( !validationContext.getProperty(JOLT_SPEC_BODY).isSet() ) {
-            return false;
-        }
-        if ( StringUtils.isEmpty(validationContext.getProperty(JOLT_SPEC_BODY).getValue() ) {
-            return false;
-        }
-        return true;
-    }
-
     /**
      * Validate that a Jolt Spec Body is Valid.
      * @param joltSpecBody PropertyValue for a joltSpecBody
      * @return True/False if a Jolt Spec Body is Valid.
      */
-    private boolean  isJoltSpecBodyValid(PropertyValue joltSpecBody ) {
+    private boolean isJoltSpecBodyPresent(PropertyValue joltSpecBody ) {
         if ( !joltSpecBody.isSet() ) {
             return false;
         }
-        if ( StringUtils.isEmpty(joltSpecBody.getValue() ) {
+        if ( StringUtils.isEmpty(joltSpecBody.getValue() )) {
             return false;
         }
         return true;
     }
 
-    private  enum JOLT_SPEC_BODY_TYPE {
-        JOLT_SPEC_BODY,
-        JOLT_SPEC_FILE,
-        JOLT_SORTR,
-        INVALID
-    }
-
-    private String validateSpecBody(ValidationContext validationContext){
-        final ClassLoader customClassLoader;
-        List<ValidationResult> results;
-
-        try {
-            if (modulePath != null) {
-                customClassLoader = ClassLoaderUtils.getCustomClassLoader(modulePath, this.getClass().getClassLoader(), getJarFilenameFilter());
-            } else {
-                customClassLoader =  this.getClass().getClassLoader();
+    private final ClassLoader getClassLoaderForCustomR(String modulePath){
+        if (modulePath != null) {
+            try {
+                return ClassLoaderUtils.getCustomClassLoader(modulePath, this.getClass().getClassLoader(), getJarFilenameFilter());
+            } catch (MalformedURLException e) {
+                getLogger().warn("Module path failed to load.", e);
+                return null;
             }
-
-            final String specValue =  validationContext.getProperty(JOLT_SPEC_BODY).getValue();
-
-            if (validationContext.isExpressionLanguagePresent(specValue)) {
-                final String invalidExpressionMsg = validationContext.newExpressionLanguageCompiler().validateExpression(specValue,true);
-                if (!StringUtils.isEmpty(invalidExpressionMsg)) {
-                    results.add(new ValidationResult.Builder().valid(false)
-                            .subject(JOLT_SPEC_BODY.getDisplayName())
-                            .explanation("Invalid Expression Language: " + invalidExpressionMsg)
-                            .build());
-                }
-            } else {
-                //for validation we want to be able to ensure the spec is syntactically correct and not try to resolve variables since they may not exist yet
-                Object specJson = SORTR.getValue().equals(transform) ? null : JsonUtils.jsonToObject(specValue.replaceAll("\\$\\{","\\\\\\\\\\$\\{"), DEFAULT_CHARSET);
-
-                if (CUSTOMR.getValue().equals(transform)) {
-                    if (StringUtils.isEmpty(customTransform)) {
-                        final String customMessage = "A custom transformation class should be provided. ";
-                        results.add(new ValidationResult.Builder().valid(false)
-                                .explanation(customMessage)
-                                .build());
-                    } else {
-                        TransformFactory.getCustomTransform(customClassLoader, customTransform, specJson);
-                    }
-                } else {
-                    TransformFactory.getTransform(customClassLoader, transform, specJson);
-                }
-            }
-        } catch (final Exception e) {
-            getLogger().info("Processor is not valid - " + e.toString());
-            String message = "Specification not valid for the selected transformation." ;
-            results.add(new ValidationResult.Builder().valid(false)
-                    .explanation(message)
-                    .build());
+        } else {
+            return this.getClass().getClassLoader();
         }
     }
 
-    /*private enum  chooseJoltSpecType() {
-        return JOLT_SPEC_BODY_TYPE.JOLT_SORTR;
-    }*/
+    private boolean validateCustomModulePath(String modulePath) {
+        if (getClassLoaderForCustomR(modulePath) == null) {
+            return false;
+        } else {
+            return true;
+        }
+
+    }
 
     @Override
     protected Collection<ValidationResult> customValidate(ValidationContext validationContext) {
-        final List<ValidationResult> results = new ArrayList<>(super.customValidate(validationContext));
-        final String transform = validationContext.getProperty(JOLT_TRANSFORM).getValue();
-        final String customTransform = validationContext.getProperty(CUSTOM_CLASS).getValue();
-        final String modulePath = validationContext.getProperty(MODULES).isSet()? validationContext.getProperty(MODULES).getValue() : null;
+        final List<ValidationResult> validationResults = new ArrayList<>(super.customValidate(validationContext));
 
-        boolean isJoltSpecBodyValid = isJoltSpecBodyValid(validationContext.getProperty(JOLT_SPEC_BODY));
-        boolean isSortTransform = SORTR.getValue().equals(validationContext.getProperty(JOLT_TRANSFORM).getValue());
+        final String transformType = validationContext.getProperty(JOLT_TRANSFORM).getValue();
+        final String customTransformType = validationContext.getProperty(CUSTOM_CLASS).getValue();
+        final String modulePath = validationContext.getProperty(MODULES).isSet() ? validationContext.getProperty(MODULES).getValue() : null;
 
+        Object specJson= null;
 
-         JOLT_SPEC_BODY_TYPE JOLT_SPEC_TYPE;
-
-        if (isSortTransform) {
-            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.JOLT_SORTR;
-        } else if (isJoltSpecBodyValid) {
-            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.JOLT_SPEC_BODY;
-        } else if (isSortTransform && isJoltSpecBodyValid) {
-            //TODO: Put Message here
-            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.INVALID;
-        } else {
-            JOLT_SPEC_TYPE = JOLT_SPEC_BODY_TYPE.INVALID;
+        //Validation #1:
+        // (1) The SORTR Transformation Type does not require a Jolt Spec
+        // (2) All other Transformation Types require a Jolt Spec
+        if (SORTR.getValue().equals( transformType )) {
+            //As documented, any specification set is ignored, so no further validation needed.
+            return validationResults;
         }
 
-        switch (JOLT_SPEC_TYPE) {
-            case JOLT_SORTR:
-                break;
-            case JOLT_SPEC_BODY:
-                //TODO Call validation code in else statement below
-                break;
-            case INVALID:
-                break;
-            default:
-                final String message = "A specification is required for this transformation";
-                results.add(new ValidationResult.Builder().valid(false)
-                        .explanation(message)
-                        .build());
+        //Validation #2:
+        //All other transformTypes require that a Jolt Spec be present
+        //Validate a Jolt Spec Body is present
+        if (!isJoltSpecBodyPresent(validationContext.getProperty(JOLT_SPEC_BODY))) {
+            validationResults.add(new ValidationResult.Builder().valid(false).explanation("Jolt specification required for the selected transformation type.").build());
+            return validationResults;
         }
-        //TODO Add a Spec Body or a Spec File
-        if( !isJoltSpecBodyValid ){
 
-            if(!isSortTransform) {
-                final String message = "A specification is required for this transformation";
-                results.add(new ValidationResult.Builder().valid(false)
-                        .explanation(message)
-                        .build());
-            }
+        //Validation #3:
+        // Validate the Jolt Spec is syntactically correct and do not try to resolve Expression Language variables since they may not exist yet
+        final String specValue = validationContext.getProperty(JOLT_SPEC_BODY).getValue();
+        specJson = JsonUtils.jsonToObject(specValue.replaceAll("\\$\\{","\\\\\\\\\\$\\{"), DEFAULT_CHARSET);
+        try {
+            TransformFactory.getTransform(customClassLoader, transformType, specJson);
+        } catch (Exception e) {
+            getLogger().error("Jolt Spec Failed to Load", e);
+            validationResults.add(new ValidationResult.Builder().valid(false).explanation("Jolt specification is syntactically incorrect.").build());
+        }
 
-        } else {
-            final ClassLoader customClassLoader;
-
-            try {
-                if (modulePath != null) {
-                    customClassLoader = ClassLoaderUtils.getCustomClassLoader(modulePath, this.getClass().getClassLoader(), getJarFilenameFilter());
-                } else {
-                    customClassLoader =  this.getClass().getClassLoader();
-                }
-
-                final String specValue =  validationContext.getProperty(JOLT_SPEC_BODY).getValue();
-
-                if (validationContext.isExpressionLanguagePresent(specValue)) {
-                    final String invalidExpressionMsg = validationContext.newExpressionLanguageCompiler().validateExpression(specValue,true);
-                    if (!StringUtils.isEmpty(invalidExpressionMsg)) {
-                        results.add(new ValidationResult.Builder().valid(false)
-                                .subject(JOLT_SPEC_BODY.getDisplayName())
-                                .explanation("Invalid Expression Language: " + invalidExpressionMsg)
-                                .build());
-                    }
-                } else {
-                    //for validation we want to be able to ensure the spec is syntactically correct and not try to resolve variables since they may not exist yet
-                    Object specJson = SORTR.getValue().equals(transform) ? null : JsonUtils.jsonToObject(specValue.replaceAll("\\$\\{","\\\\\\\\\\$\\{"), DEFAULT_CHARSET);
-
-                    if (CUSTOMR.getValue().equals(transform)) {
-                        if (StringUtils.isEmpty(customTransform)) {
-                            final String customMessage = "A custom transformation class should be provided. ";
-                            results.add(new ValidationResult.Builder().valid(false)
-                                    .explanation(customMessage)
-                                    .build());
-                        } else {
-                            TransformFactory.getCustomTransform(customClassLoader, customTransform, specJson);
-                        }
-                    } else {
-                        TransformFactory.getTransform(customClassLoader, transform, specJson);
-                    }
-                }
-            } catch (final Exception e) {
-                getLogger().info("Processor is not valid - " + e.toString());
-                String message = "Specification not valid for the selected transformation." ;
-                results.add(new ValidationResult.Builder().valid(false)
-                        .explanation(message)
+        //Validation #4:
+        // Validate Expression Language use in the Jolt Spec Body
+        if (validationContext.isExpressionLanguagePresent(specValue)) {
+            final String invalidExpressionMsg = validationContext.newExpressionLanguageCompiler().validateExpression(specValue,true);
+            if (!StringUtils.isEmpty(invalidExpressionMsg)) {
+                validationResults.add(new ValidationResult.Builder().valid(false)
+                        .subject(JOLT_SPEC_BODY.getDisplayName())
+                        .explanation("Invalid Expression Language: " + invalidExpressionMsg)
                         .build());
             }
         }
 
-        return results;
+        //Validation #5:
+        // (1) Custom Transformation Class Name is set, as it is required.
+        // (2) Module Path(s) can be loaded (optional)
+        // (3) Custom Transformation can be found on the class path.
+        if (CUSTOMR.getValue().equals(transformType)) {
+            // (1) Custom Transformation Class Name, as it is required.
+            if (StringUtils.isEmpty(customTransformType)) {
+                final String customMessage = "A custom transformation class should be provided.";
+                validationResults.add(new ValidationResult.Builder().valid(false).explanation(customMessage).build());
+                return validationResults;
+            }
+
+            // (2) Module Path(s) can be loaded (optional)
+            if (!validateCustomModulePath(modulePath)) {
+                validationResults.add(new ValidationResult.Builder().valid(false).explanation("Module path failed to load.").build());
+                return validationResults;
+            }
+
+
+            // (3) Custom Transformation can be found on the class path.
+            final ClassLoader customClassLoader = getClassLoaderForCustomR(modulePath);
+            if (customClassLoader != null){
+                try {
+                    TransformFactory.getCustomTransform(customClassLoader, customTransformType, specJson);
+                } catch (Exception ex) {
+                    getLogger().error("Failed to get Custom Transform");
+                    validationResults.add(new ValidationResult.Builder().valid(false).explanation("Module path failed to load.").build());
+                    return validationResults;
+                }
+            }
+        }
+
+        return validationResults;
     }
 
     @Override
