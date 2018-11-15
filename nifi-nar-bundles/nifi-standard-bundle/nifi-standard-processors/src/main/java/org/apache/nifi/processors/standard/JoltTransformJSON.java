@@ -259,7 +259,7 @@ public class JoltTransformJSON extends AbstractProcessor {
         //All other transformTypes require that a Jolt Spec be present
         //Validate a Jolt Spec Body is present
         if (!isJoltSpecBodyPresent(validationContext.getProperty(JOLT_SPEC_BODY))) {
-            validationResults.add(new ValidationResult.Builder().valid(false).explanation("Jolt specification required for the selected transformation type.").build());
+            validationResults.add(new ValidationResult.Builder().valid(false).subject(JOLT_SPEC_BODY.getDisplayName()).explanation("Jolt specification required for the selected transformation type.").build());
             return validationResults;
         }
 
@@ -270,8 +270,7 @@ public class JoltTransformJSON extends AbstractProcessor {
         try {
             TransformFactory.getTransform(customClassLoader, transformType, specJson);
         } catch (Exception e) {
-            getLogger().error("Jolt Spec Failed to Load", e);
-            validationResults.add(new ValidationResult.Builder().valid(false).explanation("Jolt specification is syntactically incorrect.").build());
+            validationResults.add(new ValidationResult.Builder().valid(false).subject(JOLT_SPEC_BODY.getDisplayName()).explanation("Jolt specification is syntactically incorrect: " + e.getMessage()).build());
         }
 
         //Validation #4:
@@ -294,13 +293,13 @@ public class JoltTransformJSON extends AbstractProcessor {
             // (1) Custom Transformation Class Name, as it is required.
             if (StringUtils.isEmpty(customTransformType)) {
                 final String customMessage = "A custom transformation class should be provided.";
-                validationResults.add(new ValidationResult.Builder().valid(false).explanation(customMessage).build());
+                validationResults.add(new ValidationResult.Builder().valid(false).subject(CUSTOMR.getDisplayName()).explanation(customMessage).build());
                 return validationResults;
             }
 
             // (2) Module Path(s) can be loaded (optional)
             if (!validateCustomModulePath(modulePath)) {
-                validationResults.add(new ValidationResult.Builder().valid(false).explanation("Module path failed to load.").build());
+                validationResults.add(new ValidationResult.Builder().valid(false).subject(CUSTOMR.getDisplayName()).explanation("Module path failed to load.").build());
                 return validationResults;
             }
 
@@ -311,8 +310,7 @@ public class JoltTransformJSON extends AbstractProcessor {
                 try {
                     TransformFactory.getCustomTransform(customClassLoader, customTransformType, specJson);
                 } catch (Exception ex) {
-                    getLogger().error("Failed to get Custom Transform");
-                    validationResults.add(new ValidationResult.Builder().valid(false).explanation("Module path failed to load.").build());
+                    validationResults.add(new ValidationResult.Builder().valid(false).subject(CUSTOMR.getDisplayName()).explanation("Module path failed to load: " + ex.getMessage()).build());
                     return validationResults;
                 }
             }
