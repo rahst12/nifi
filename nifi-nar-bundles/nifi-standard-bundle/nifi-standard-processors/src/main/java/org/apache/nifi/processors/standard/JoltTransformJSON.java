@@ -155,10 +155,10 @@ public class JoltTransformJSON extends AbstractProcessor {
             .description("If a FlowFile fails processing for any reason (for example, the FlowFile is not valid JSON), it will be routed to this relationship")
             .build();
 
-    private final static List<PropertyDescriptor> properties;
-    private final static Set<Relationship> relationships;
+    private static final List<PropertyDescriptor> properties;
+    private static final Set<Relationship> relationships;
     private volatile ClassLoader customClassLoader;
-    private final static String DEFAULT_CHARSET = "UTF-8";
+    private static final String DEFAULT_CHARSET = "UTF-8";
 
     // Cache is guarded by synchronizing on 'this'.
     private volatile int maxTransformsToCache = 10;
@@ -435,7 +435,7 @@ public class JoltTransformJSON extends AbstractProcessor {
         }
     }
 
-    protected FilenameFilter getJarFilenameFilter(){
+    protected FilenameFilter getJarFilenameFilter() {
         return (dir, name) -> (name != null && name.endsWith(".jar"));
     }
 
