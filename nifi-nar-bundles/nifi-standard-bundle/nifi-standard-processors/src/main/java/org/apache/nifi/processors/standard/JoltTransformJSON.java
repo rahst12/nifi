@@ -256,8 +256,8 @@ public class JoltTransformJSON extends AbstractProcessor {
         }
 
         //Validation #2:
-        //All other transformTypes require that a Jolt Spec be present
-        //Validate a Jolt Spec Body is present
+        // All other transformTypes require that a Jolt Spec be present
+        // Validate a Jolt Spec Body is present
         if (!isJoltSpecBodyPresent(validationContext.getProperty(JOLT_SPEC_BODY))) {
             validationResults.add(new ValidationResult.Builder().valid(false).subject(JOLT_SPEC_BODY.getDisplayName()).explanation("Jolt specification required for the selected transformation type.").build());
             return validationResults;
@@ -329,24 +329,36 @@ public class JoltTransformJSON extends AbstractProcessor {
         final ComponentLog logger = getLogger();
         final StopWatch stopWatch = new StopWatch(true);
 
+        // Parse FlowFile into JSON
         final Object inputJson;
         try (final InputStream in = session.read(original)) {
             inputJson = JsonUtils.jsonToObject(in);
         } catch (final Exception e) {
-            logger.error("Failed to transform {}; routing to failure", new Object[] {original, e});
+            logger.error("Failed to parse JSON {}; routing to failure", new Object[] {original, e});
             session.transfer(original, REL_FAILURE);
             return;
         }
 
+        // Load Jolt Transform
+        final JoltTransform transform;
+        try {
+            transform = getTransform(context, original);
+        } catch (final Exception ex) {
+            logger.error("Unable to load transform {} due to {}", new Object[] {original, ex.toString(), ex});
+            session.transfer(original, REL_FAILURE);
+            return;
+        }
+
+        // Transform Data
         final String jsonString;
         final ClassLoader originalContextClassLoader = Thread.currentThread().getContextClassLoader();
         try {
-            final JoltTransform transform = getTransform(context, original);
+            //Load Custom Class Loader for Custom Modules
             if (customClassLoader != null) {
                 Thread.currentThread().setContextClassLoader(customClassLoader);
             }
 
-            final Object transformedJson = TransformUtils.transform(transform,inputJson);
+            final Object transformedJson = TransformUtils.transform(transform, inputJson);
             jsonString = context.getProperty(PRETTY_PRINT).asBoolean() ? JsonUtils.toPrettyJsonString(transformedJson) : JsonUtils.toJsonString(transformedJson);
         } catch (final Exception ex) {
             logger.error("Unable to transform {} due to {}", new Object[] {original, ex.toString(), ex});
@@ -372,32 +384,51 @@ public class JoltTransformJSON extends AbstractProcessor {
         logger.info("Transformed {}", new Object[]{original});
     }
 
-    private JoltTransform getTransform(final ProcessContext context, final FlowFile flowFile) throws Exception {
+    public JoltTransform getTransform(final ProcessContext context, final FlowFile flowFile) throws Exception {
+
+        final String transformType = context.getProperty(JOLT_TRANSFORM).getValue();
+        final String customTransformType = context.getProperty(CUSTOM_CLASS).getValue();
+        final String modulePath = context.getProperty(MODULES).isSet() ? context.getProperty(MODULES).getValue() : null;
+
+        JoltTransform transform = null;
+
+        //Transform Order of Operations #1:
+        // (1) The SORTR Transformation Type does not require a Jolt Spec
+        // (2) All other Transformation Types require a Jolt Spec
+        if (SORTR.getValue().equals( transformType )) {
+            //As documented, any specification set is ignored, so no further validation needed.
+            //TODO: Need to figure out how the SORTR transform is loaded.  Is it a direct class transform?
+            //TODO: Remove validationResults from this.  Remember - it's already valid.  Just loading based on order of operations
+            // of the input of the text boxes.
+            //TODO: Order of operations should be added to the Usage Guide for this processor.
+
+            transform = TransformFactory.getTransform(customClassLoader, context.getProperty(JOLT_TRANSFORM).getValue(), null);
+            return transform;
+        }
+
+        //Transform Order of Operations #2:
+        // All transformation specs, other than SORTR, require a Jolt Spec to be present
         final String specString;
-        if (context.getProperty(JOLT_SPEC_BODY).isSet()) {
+        if (isJoltSpecBodyPresent(context.getProperty(JOLT_SPEC_BODY))) {
             specString = context.getProperty(JOLT_SPEC_BODY).evaluateAttributeExpressions(flowFile).getValue();
         } else {
             specString = null;
         }
 
-        // Get the transform from our cache, if it exists.
-        JoltTransform transform = null;
+        // Get the transform from our cache, if it exists, Otherwise create the Transform.
         synchronized (this) {
             transform = transformCache.get(specString);
         }
 
+        //Short-circuit our processing if the transform already exists to save time.
         if (transform != null) {
             return transform;
         }
 
-        // If no transform for our spec, create the transform.
-        final Object specJson;
-        if (context.getProperty(JOLT_SPEC_BODY).isSet() && !SORTR.getValue().equals(context.getProperty(JOLT_TRANSFORM).getValue())) {
-            specJson = JsonUtils.jsonToObject(specString, DEFAULT_CHARSET);
-        } else {
-            specJson = null;
-        }
+        //Create the transformation (no need to validate, validation has already occured)
+        final Object specJson = JsonUtils.jsonToObject(specString, DEFAULT_CHARSET);
 
+        //If it's a custom module, then grab it, otherwise load up the selected jolt transform.
         if (CUSTOMR.getValue().equals(context.getProperty(JOLT_TRANSFORM).getValue())) {
             transform = TransformFactory.getCustomTransform(customClassLoader, context.getProperty(CUSTOM_CLASS).getValue(), specJson);
         } else {
@@ -407,16 +438,17 @@ public class JoltTransformJSON extends AbstractProcessor {
         // Check again for the transform in our cache, since it's possible that another thread has
         // already populated it. If absent from the cache, populate the cache. Otherwise, use the
         // value from the cache.
+        // TODO: Should be storing a hash of the specString
         synchronized (this) {
             final JoltTransform existingTransform = transformCache.get(specString);
             if (existingTransform == null) {
                 transformCache.put(specString, transform);
+                return transform;
             } else {
-                transform = existingTransform;
+                return existingTransform;
             }
         }
 
-        return transform;
     }
 
     @OnScheduled
